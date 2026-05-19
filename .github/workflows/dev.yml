@@ -1,0 +1,128 @@
+name: dev-artifact-first
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: write
+
+jobs:
+  build-artifact-and-deploy:
+    if: "!contains(github.event.head_commit.message, '[artifact commit]')"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: book-shop
+
+    steps:
+      - name: Checkout dev branch
+        uses: actions/checkout@v4
+
+      - name: Set build names
+        run: |
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-12)
+          ARTIFACT_BASENAME="app-${SHORT_SHA}-${GITHUB_RUN_NUMBER}.tar.gz"
+          IMAGE_TAG="bookshop-dev:${SHORT_SHA}"
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          echo "ARTIFACT_BASENAME=$ARTIFACT_BASENAME" >> $GITHUB_ENV
+          echo "ARTIFACT_PATH=artifacts/$ARTIFACT_BASENAME" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Install Python dependencies for artifact packaging
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Collect static files
+        env:
+          SECRET_KEY: ci-secret-key
+          DEBUG: "True"
+          ALLOWED_HOSTS: localhost,127.0.0.1
+          POSTGRES_DB: dummy
+          POSTGRES_USER: dummy
+          POSTGRES_PASSWORD: dummy
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+        run: |
+          python manage.py collectstatic --noinput
+
+      - name: Build application artifact
+        run: |
+          mkdir -p build_artifact/app
+          cp -r book_shop build_artifact/app/
+          cp -r books build_artifact/app/
+          cp -r templates build_artifact/app/
+          cp manage.py build_artifact/app/
+          cp requirements.txt build_artifact/app/
+          if [ -f book.json ]; then cp book.json build_artifact/app/; fi
+          if [ -f users.json ]; then cp users.json build_artifact/app/; fi
+          if [ -d staticfiles ]; then cp -r staticfiles build_artifact/app/; fi
+          python -m pip freeze > build_artifact/app/requirements.lock.txt
+          mkdir -p artifacts
+          tar -czf "$ARTIFACT_PATH" -C build_artifact app
+          ls -lh "$ARTIFACT_PATH"
+
+      - name: Commit artifact back to dev branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add "$ARTIFACT_PATH"
+          git commit -m "[artifact commit] Add dev artifact $ARTIFACT_BASENAME"
+          git push origin dev
+
+      - name: Build Docker image from committed artifact
+        run: |
+          docker build \
+            --build-arg ARTIFACT_NAME="$ARTIFACT_BASENAME" \
+            -t "$IMAGE_TAG" .
+
+      - name: Save Docker image for EC2
+        run: |
+          docker save "$IMAGE_TAG" | gzip > dev-image.tar.gz
+          ls -lh dev-image.tar.gz
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H "${{ vars.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy image and compose files to EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key ec2-user@${{ vars.EC2_HOST }} "mkdir -p /tmp/bookshop-dev"
+          scp -i ~/.ssh/ec2_key dev-image.tar.gz docker-compose.yml nginx.conf ec2-user@${{ vars.EC2_HOST }}:/tmp/bookshop-dev/
+
+      - name: Deploy dev to EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key ec2-user@${{ vars.EC2_HOST }} << EOF
+          set -e
+
+          docker load -i /tmp/bookshop-dev/dev-image.tar.gz
+
+          mkdir -p ~/bookshop/dev
+          cp /tmp/bookshop-dev/docker-compose.yml ~/bookshop/dev/docker-compose.yml
+          cp /tmp/bookshop-dev/nginx.conf ~/bookshop/dev/nginx.conf
+
+          cd ~/bookshop/dev
+
+          cat > .env << ENVEOF
+          COMPOSE_PROJECT_NAME=bookshop_dev
+          NGINX_PORT=8081
+          APP_IMAGE=${IMAGE_TAG}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          DEBUG=True
+          ALLOWED_HOSTS=localhost,127.0.0.1,${{ vars.EC2_HOST }}
+          POSTGRES_DB=bookshop_db
+          POSTGRES_USER=bookshop_user
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_HOST=db
+          POSTGRES_PORT=5432
+          ENVEOF
+
+          docker compose --env-file .env -p bookshop_dev up -d --remove-orphans
+          docker compose --env-file .env -p bookshop_dev ps
+          EOF
