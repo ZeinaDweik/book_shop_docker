@@ -115,3 +115,40 @@ Database data is stored in a named Docker volume called `postgres_data`.
 ## Notes
 
 The real `.env` file is ignored by Git and should not be committed. Only `.env.example` is included as a template.
+# Phase 2 — CI/CD Pipelines
+
+This project implements three GitHub Actions CI/CD pipelines for the Dockerized Django Book Shop application.
+
+## Group Size and Registry Choice
+
+Group size: 2 students  
+Registry: Docker Hub
+
+This matches the assignment rule that groups of 2 push images to Docker Hub.
+
+## Branch Strategy
+
+The project uses three deployment branches:
+
+| Branch | Philosophy | Deployment |
+|---|---|---|
+| dev | Artifact-first | Builds an artifact, commits it to `artifacts/`, builds the image from that artifact, and deploys to EC2 |
+| test | Image-first | Rebuilds a fresh artifact from source, builds a fresh image, pushes it to Docker Hub, and deploys by pulling the image |
+| prod | Promotion only | Does not build anything; it pulls the image version defined by the GitHub repository variable `IMAGE_VERSION` |
+
+## Deployment Ports
+
+All branches deploy to the same EC2 instance, but they do not conflict because each branch uses a different compose project name and host port.
+
+| Environment | Compose Project | Port |
+|---|---|---|
+| dev | `bookshop_dev` | `8081` |
+| test | `bookshop_test` | `8082` |
+| prod | `bookshop_prod` | `8083` |
+
+Application URLs:
+
+```text
+dev:  http://EC2_HOST:8081
+test: http://EC2_HOST:8082
+prod: http://EC2_HOST:8083
