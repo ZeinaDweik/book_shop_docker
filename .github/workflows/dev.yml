@@ -60,7 +60,7 @@ jobs:
           if [ -f book.json ]; then cp book.json build_artifact/app/; fi
           if [ -f users.json ]; then cp users.json build_artifact/app/; fi
           if [ -d staticfiles ]; then cp -r staticfiles build_artifact/app/; fi
-          python -m pip freeze > build_artifact/app/requirements.lock.txt
+          cp requirements.txt build_artifact/app/requirements.lock.txt
           mkdir -p artifacts
           tar -czf "$ARTIFACT_PATH" -C build_artifact app
           ls -lh "$ARTIFACT_PATH"
