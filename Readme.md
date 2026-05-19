@@ -7,7 +7,6 @@ This project containerizes the Django Book Shop application using Docker and Doc
 - `db`: PostgreSQL 15 database
 - `backend`: Django Book Shop application running with Gunicorn
 
-Nginx configuration was skipped because Step 5 was not required for this submission.
 
 ## Requirements
 
@@ -121,7 +120,7 @@ This project implements three GitHub Actions CI/CD pipelines for the Dockerized 
 
 ## Group Size and Registry Choice
 
-Group size: 2 students  
+Group size: 1 student
 Registry: Docker Hub
 
 This matches the assignment rule that groups of 2 push images to Docker Hub.
