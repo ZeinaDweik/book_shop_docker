@@ -1,0 +1,66 @@
+name: prod-promotion-only
+
+on:
+  push:
+    branches:
+      - prod
+
+jobs:
+  promote-to-prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout prod branch for compose files only
+        uses: actions/checkout@v4
+
+      - name: Set promoted image
+        run: |
+          IMAGE_TAG="${{ vars.IMAGE_NAME }}:${{ vars.IMAGE_VERSION }}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "Promoting image: $IMAGE_TAG"
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H "${{ vars.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy compose files to EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key ec2-user@${{ vars.EC2_HOST }} "mkdir -p /tmp/bookshop-prod"
+          scp -i ~/.ssh/ec2_key docker-compose.yml nginx.conf ec2-user@${{ vars.EC2_HOST }}:/tmp/bookshop-prod/
+
+      - name: Deploy prod by pulling promoted image only
+        run: |
+          ssh -i ~/.ssh/ec2_key ec2-user@${{ vars.EC2_HOST }} << EOF
+          set -e
+
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login \
+            -u "${{ secrets.DOCKERHUB_USERNAME }}" \
+            --password-stdin
+
+          mkdir -p ~/bookshop/prod
+          cp /tmp/bookshop-prod/docker-compose.yml ~/bookshop/prod/docker-compose.yml
+          cp /tmp/bookshop-prod/nginx.conf ~/bookshop/prod/nginx.conf
+
+          cd ~/bookshop/prod
+
+          cat > .env << ENVEOF
+          COMPOSE_PROJECT_NAME=bookshop_prod
+          NGINX_PORT=8083
+          APP_IMAGE=${IMAGE_TAG}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          DEBUG=True
+          ALLOWED_HOSTS=localhost,127.0.0.1,${{ vars.EC2_HOST }}
+          POSTGRES_DB=bookshop_db
+          POSTGRES_USER=bookshop_user
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_HOST=db
+          POSTGRES_PORT=5432
+          ENVEOF
+
+          docker compose --env-file .env -p bookshop_prod pull backend
+          docker compose --env-file .env -p bookshop_prod up -d --remove-orphans
+          docker compose --env-file .env -p bookshop_prod ps
+          EOF

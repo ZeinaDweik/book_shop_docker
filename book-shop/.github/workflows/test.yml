@@ -1,0 +1,122 @@
+name: test-image-first
+
+on:
+  push:
+    branches:
+      - test
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v4
+
+      - name: Set build names
+        run: |
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-12)
+          ARTIFACT_BASENAME="test-app-${SHORT_SHA}-${GITHUB_RUN_NUMBER}.tar.gz"
+          IMAGE_TAG="${{ vars.IMAGE_NAME }}:test-${GITHUB_SHA}"
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          echo "ARTIFACT_BASENAME=$ARTIFACT_BASENAME" >> $GITHUB_ENV
+          echo "ARTIFACT_PATH=artifacts/$ARTIFACT_BASENAME" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Install Python dependencies for fresh artifact
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Collect static files
+        env:
+          SECRET_KEY: ci-secret-key
+          DEBUG: "True"
+          ALLOWED_HOSTS: localhost,127.0.0.1
+          POSTGRES_DB: dummy
+          POSTGRES_USER: dummy
+          POSTGRES_PASSWORD: dummy
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+        run: |
+          python manage.py collectstatic --noinput
+
+      - name: Build fresh artifact inside test workflow
+        run: |
+          rm -rf artifacts
+          mkdir -p artifacts
+          mkdir -p build_artifact/app
+          cp -r book_shop build_artifact/app/
+          cp -r books build_artifact/app/
+          cp -r templates build_artifact/app/
+          cp manage.py build_artifact/app/
+          cp requirements.txt build_artifact/app/
+          if [ -f book.json ]; then cp book.json build_artifact/app/; fi
+          if [ -f users.json ]; then cp users.json build_artifact/app/; fi
+          if [ -d staticfiles ]; then cp -r staticfiles build_artifact/app/; fi
+          python -m pip freeze > build_artifact/app/requirements.lock.txt
+          tar -czf "$ARTIFACT_PATH" -C build_artifact app
+          ls -lh "$ARTIFACT_PATH"
+
+      - name: Build Docker image from fresh test artifact
+        run: |
+          docker build \
+            --build-arg ARTIFACT_NAME="$ARTIFACT_BASENAME" \
+            -t "$IMAGE_TAG" .
+
+      - name: Login to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login \
+            -u "${{ secrets.DOCKERHUB_USERNAME }}" \
+            --password-stdin
+
+      - name: Push image to Docker Hub
+        run: |
+          docker push "$IMAGE_TAG"
+          echo "Pushed image: $IMAGE_TAG"
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H "${{ vars.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy compose files to EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key ec2-user@${{ vars.EC2_HOST }} "mkdir -p /tmp/bookshop-test"
+          scp -i ~/.ssh/ec2_key docker-compose.yml nginx.conf ec2-user@${{ vars.EC2_HOST }}:/tmp/bookshop-test/
+
+      - name: Deploy test to EC2 by pulling image
+        run: |
+          ssh -i ~/.ssh/ec2_key ec2-user@${{ vars.EC2_HOST }} << EOF
+          set -e
+
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login \
+            -u "${{ secrets.DOCKERHUB_USERNAME }}" \
+            --password-stdin
+
+          mkdir -p ~/bookshop/test
+          cp /tmp/bookshop-test/docker-compose.yml ~/bookshop/test/docker-compose.yml
+          cp /tmp/bookshop-test/nginx.conf ~/bookshop/test/nginx.conf
+
+          cd ~/bookshop/test
+
+          cat > .env << ENVEOF
+          COMPOSE_PROJECT_NAME=bookshop_test
+          NGINX_PORT=8082
+          APP_IMAGE=${IMAGE_TAG}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          DEBUG=True
+          ALLOWED_HOSTS=localhost,127.0.0.1,${{ vars.EC2_HOST }}
+          POSTGRES_DB=bookshop_db
+          POSTGRES_USER=bookshop_user
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_HOST=db
+          POSTGRES_PORT=5432
+          ENVEOF
+
+          docker compose --env-file .env -p bookshop_test pull backend
+          docker compose --env-file .env -p bookshop_test up -d --remove-orphans
+          docker compose --env-file .env -p bookshop_test ps
+          EOF

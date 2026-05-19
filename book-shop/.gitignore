@@ -1,4 +1,8 @@
 .env
+*.pem
 __pycache__/
 *.pyc
 db.sqlite3
+staticfiles/
+build_artifact/
+dev-image.tar.gz
