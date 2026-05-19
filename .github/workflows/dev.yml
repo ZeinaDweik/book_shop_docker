@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: dev-deployment
+  cancel-in-progress: false
+
 jobs:
   build-artifact-and-deploy:
     if: "!contains(github.event.head_commit.message, '[artifact commit]')"
@@ -20,6 +24,9 @@ jobs:
     steps:
       - name: Checkout dev branch
         uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
 
       - name: Set build names
         run: |
@@ -71,7 +78,9 @@ jobs:
           git config user.email "github-actions@github.com"
           git add "$ARTIFACT_PATH"
           git commit -m "[artifact commit] Add dev artifact $ARTIFACT_BASENAME"
-          git push origin dev
+          git fetch origin dev
+          git rebase origin/dev
+          git push origin HEAD:dev
 
       - name: Build Docker image from committed artifact
         run: |
