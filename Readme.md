@@ -152,7 +152,7 @@ Application URLs:
 dev:  http://EC2_HOST:8081
 test: http://EC2_HOST:8082
 prod: http://EC2_HOST:8083
-
+```
 ## GitHub Actions Secrets and Variables
 
 Repository variables:
